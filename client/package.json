@@ -1,0 +1,24 @@
+{
+  "name": "brokenvault-cli",
+  "version": "0.1.0",
+  "description": "BrokenVault command-line backup client",
+  "type": "module",
+  "bin": {
+    "brokenvault": "./dist/index.js"
+  },
+  "engines": {
+    "node": ">=20.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "node --import tsx --test test/scanner.test.ts test/chunker.test.ts test/backup.test.ts test/commands.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

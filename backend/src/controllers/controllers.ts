@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, writeFile, readFile, utimes } from "node:fs/promises";
 import path from "node:path";
 
@@ -11,6 +11,7 @@ import {
 } from "../validation/manifest.js";
 
 const CHUNK_LOOKUP_BATCH = 5000;
+const INSERT_BATCH = 2000;
 const MAX_REPORTED_ISSUES = 50;
 
 function manifestRejection(issues: ManifestIssue[]) {
@@ -238,41 +239,39 @@ export async function createManifest(req: Request, res: Response) {
       return res.status(400).json(manifestRejection(referenceIssues));
     }
 
-    await prisma.$transaction(async (tx) => {
-      for (const entry of validated) {
-        const manifestEntry = await tx.manifestEntry.create({
-          data: {
-            versionId: upload.versionId,
-            path: entry.path,
-            type: entry.type,
-            size: entry.size,
-            mtime: entry.mtime,
-          },
-        });
+    const entryRows = validated.map((entry) => ({
+      id: randomUUID(),
+      versionId: upload.versionId,
+      path: entry.path,
+      type: entry.type,
+      size: entry.size,
+      mtime: entry.mtime,
+    }));
 
-        if (entry.type !== "file") {
-          continue;
-        }
+    const chunkRows = validated.flatMap((entry, index) =>
+      entry.chunks.map((chunkId, position) => ({
+        entryId: entryRows[index]!.id,
+        chunkId,
+        position,
+      }))
+    );
 
-        for (let i = 0; i < entry.chunks.length; i++) {
-          const chunkId = entry.chunks[i];
-
-          if (typeof chunkId !== "string") {
-            throw new Error(
-              `Invalid chunk ID in "${entry.path}"`
-            );
-          }
-
-          await tx.manifestChunk.create({
-            data: {
-              entryId: manifestEntry.id,
-              chunkId,
-              position: i,
-            },
+    await prisma.$transaction(
+      async (tx) => {
+        for (let i = 0; i < entryRows.length; i += INSERT_BATCH) {
+          await tx.manifestEntry.createMany({
+            data: entryRows.slice(i, i + INSERT_BATCH),
           });
         }
-      }
-    });
+
+        for (let i = 0; i < chunkRows.length; i += INSERT_BATCH) {
+          await tx.manifestChunk.createMany({
+            data: chunkRows.slice(i, i + INSERT_BATCH),
+          });
+        }
+      },
+      { timeout: 60_000, maxWait: 10_000 }
+    );
 
     return res.status(201).json({
       message: "Manifest created",
@@ -458,7 +457,7 @@ function isNotFoundError(error: unknown): boolean {
   );
 }
 
-async function readStoredChunk(chunkId: string): Promise<Buffer | null> {
+export async function readStoredChunk(chunkId: string): Promise<Buffer | null> {
   try {
     return await readFile(path.resolve("storage/chunks", chunkId));
   } catch (error) {
