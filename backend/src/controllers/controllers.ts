@@ -4,6 +4,22 @@ import { mkdir, writeFile, readFile, utimes } from "node:fs/promises";
 import path from "node:path";
 
 import { prisma } from "../config/db.js";
+import {
+  checkChunkReferences,
+  validateManifestEntries,
+  type ManifestIssue,
+} from "../validation/manifest.js";
+
+const CHUNK_LOOKUP_BATCH = 5000;
+const MAX_REPORTED_ISSUES = 50;
+
+function manifestRejection(issues: ManifestIssue[]) {
+  return {
+    error: "Invalid manifest",
+    totalIssues: issues.length,
+    issues: issues.slice(0, MAX_REPORTED_ISSUES),
+  };
+}
 
 export async function createUpload(req: Request, res: Response) {
   try {
@@ -158,7 +174,7 @@ export async function createManifest(req: Request, res: Response) {
       });
     }
 
-    const { entries } = req.body;
+    const entries = req.body?.entries;
 
     if (!Array.isArray(entries)) {
       return res.status(400).json({
@@ -187,35 +203,55 @@ export async function createManifest(req: Request, res: Response) {
       });
     }
 
-    await prisma.$transaction(async (tx) => {
-      for (const entry of entries) {
-        if (
-          typeof entry.path !== "string" ||
-          typeof entry.type !== "string" ||
-          typeof entry.size !== "number" ||
-          typeof entry.mtime !== "string"
-        ) {
-          throw new Error("Invalid manifest entry");
-        }
+    const { entries: validated, issues } = validateManifestEntries(entries);
 
+    if (issues.length > 0) {
+      return res.status(400).json(manifestRejection(issues));
+    }
+
+    const referencedIds = [
+      ...new Set(validated.flatMap((entry) => entry.chunks)),
+    ];
+    const knownChunkSizes = new Map<string, number>();
+
+    for (let i = 0; i < referencedIds.length; i += CHUNK_LOOKUP_BATCH) {
+      const rows = await prisma.chunk.findMany({
+        where: {
+          id: {
+            in: referencedIds.slice(i, i + CHUNK_LOOKUP_BATCH),
+          },
+        },
+        select: {
+          id: true,
+          size: true,
+        },
+      });
+
+      for (const row of rows) {
+        knownChunkSizes.set(row.id, row.size);
+      }
+    }
+
+    const referenceIssues = checkChunkReferences(validated, knownChunkSizes);
+
+    if (referenceIssues.length > 0) {
+      return res.status(400).json(manifestRejection(referenceIssues));
+    }
+
+    await prisma.$transaction(async (tx) => {
+      for (const entry of validated) {
         const manifestEntry = await tx.manifestEntry.create({
           data: {
             versionId: upload.versionId,
             path: entry.path,
             type: entry.type,
             size: entry.size,
-            mtime: new Date(entry.mtime),
+            mtime: entry.mtime,
           },
         });
 
         if (entry.type !== "file") {
           continue;
-        }
-
-        if (!Array.isArray(entry.chunks)) {
-          throw new Error(
-            `File entry "${entry.path}" must contain chunks`
-          );
         }
 
         for (let i = 0; i < entry.chunks.length; i++) {
@@ -413,6 +449,27 @@ export async function listVersions(req: Request, res: Response) {
   }
 }
 
+function isNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
+}
+
+async function readStoredChunk(chunkId: string): Promise<Buffer | null> {
+  try {
+    return await readFile(path.resolve("storage/chunks", chunkId));
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
 export async function restoreVersion(req: Request, res: Response) {
   try {
     const versionId = req.params.versionId;
@@ -504,12 +561,31 @@ export async function restoreVersion(req: Request, res: Response) {
       const buffers: Buffer[] = [];
 
       for (const manifestChunk of entry.chunks) {
-        const chunkPath = path.resolve(
-          "storage/chunks",
-          manifestChunk.chunkId
-        );
+        const chunk = await readStoredChunk(manifestChunk.chunkId);
 
-        const chunk = await readFile(chunkPath);
+        if (chunk === null) {
+          return res.status(409).json({
+            error: "Stored chunk is missing",
+            code: "chunk_missing",
+            versionId: version.id,
+            path: entry.path,
+            chunkId: manifestChunk.chunkId,
+          });
+        }
+
+        const actualHash = createHash("sha256").update(chunk).digest("hex");
+
+        if (actualHash !== manifestChunk.chunkId) {
+          return res.status(409).json({
+            error: "Stored chunk is corrupted",
+            code: "chunk_corrupted",
+            versionId: version.id,
+            path: entry.path,
+            chunkId: manifestChunk.chunkId,
+            expectedHash: manifestChunk.chunkId,
+            actualHash,
+          });
+        }
 
         buffers.push(chunk);
       }
