@@ -1,13 +1,64 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
-  output   = "../generated/prisma"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+model Version {
+  id        String   @id @default(cuid())
+  status    String   @default("unfinished")
+  createdAt DateTime @default(now())
+
+  upload    Upload?
+  entries   ManifestEntry[]
+}
+
+
+model Upload {
+  id        String   @id @default(cuid())
+  versionId String   @unique
+  status    String   @default("unfinished")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  version   Version  @relation(fields: [versionId], references: [id])
+}
+
+model Chunk {
+  id        String   @id
+  size      Int
+  createdAt DateTime @default(now())
+
+  manifestChunks ManifestChunk[]
+}
+
+
+model ManifestEntry {
+  id        String   @id @default(cuid())
+  versionId String
+
+  path      String
+  type      String
+  size      Int
+  mtime     DateTime
+
+  version   Version  @relation(fields: [versionId], references: [id])
+  chunks    ManifestChunk[]
+
+  @@unique([versionId, path])
+}
+
+model ManifestChunk {
+  id         String @id @default(cuid())
+  entryId    String
+  chunkId    String
+  position   Int
+
+  entry      ManifestEntry @relation(fields: [entryId], references: [id])
+  chunk      Chunk         @relation(fields: [chunkId], references: [id])
+
+  @@unique([entryId, position])
 }
