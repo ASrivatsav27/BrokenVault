@@ -1,0 +1,16 @@
+{
+  "name": "brokenvault",
+  "private": true,
+  "type": "module",
+  "description": "BrokenVault: integration tests that run the real CLI against the real backend",
+  "scripts": {
+    "test": "node --import tsx --test tests/backup.test.ts tests/restore.test.ts tests/resume.test.ts tests/deduplication.test.ts tests/verify.test.ts",
+    "test:client": "npm --prefix client test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

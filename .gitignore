@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.env
+brokenvault_sample_v1/
+brokenvault_sample_v2/
+real-test-data/
